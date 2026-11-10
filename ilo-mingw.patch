@@ -1,0 +1,15 @@
+diff --git a/src/async_fileio_not_supported.cpp b/src/async_fileio_not_supported.cpp
+index e4a3442..2ef1dd0 100644
+--- a/src/async_fileio_not_supported.cpp
++++ b/src/async_fileio_not_supported.cpp
+@@ -86,6 +86,10 @@ amm-info@iis.fraunhofer.de
+  */
+ 
+ // System includes
++#include <share.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <io.h>
+ #include <system_error>
+ #if defined(WIN32) || defined(_WIN32)
+ #include <io.h>

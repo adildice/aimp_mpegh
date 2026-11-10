@@ -1,0 +1,4 @@
+out/
+deps/
+aimp_sdk/
+*.wav
