@@ -12,15 +12,18 @@ them with its own decoders.
 ## Install
 
 1. Download `aimp_mpegh_plugin.zip` from [Releases](../../releases).
-2. Close AIMP and unzip so that you get `AIMP\Plugins\aimp_mpegh\aimp_mpegh.dll`
-   (the folder and the DLL must keep the same name).
-3. Start AIMP; *Preferences → Plugins* should list "MPEG-H 3D Audio decoder".
+2. In AIMP open *Preferences → Plugins → Install*, pick the zip and restart AIMP.
+3. *Preferences → Plugins* should now list "MPEG-H 3D Audio decoder".
+
+Manual install: unzip into `AIMP\Plugins` so that you get `AIMP\Plugins\aimp_mpegh\x64\aimp_mpegh.dll`.
 
 If an MPEG-H file has a wrong extension (for example `.flac`), rename it to `.m4a`.
 
 ## Settings
 
-Edit `aimp_mpegh.ini` next to the DLL. Changes apply to the next track you start.
+Edit `aimp_mpegh.ini`. Changes apply to the next track you start. The file sits next to
+`aimp_mpegh.dll`; if it is missing, the plugin creates it on first start, next to the DLL or,
+when that folder is write-protected, in AIMP's profile folder (usually `%AppData%\AIMP`).
 
 | Key | Values |
 | --- | --- |

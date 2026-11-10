@@ -90,7 +90,12 @@ struct Core : Ref<IAIMPCore> {
     if (IsEqualGUID(iid, IID_IAIMPString)) { *o = new Str(); return S_OK; }
     return E_NOTIMPL;
   }
-  HRESULT WINAPI GetPath(int, IAIMPString**) override { return E_NOTIMPL; }
+  HRESULT WINAPI GetPath(int, IAIMPString** o) override {
+    const char* p = getenv("TEST_PROFILE");
+    if (!p) return E_NOTIMPL;
+    Str* s = new Str(); for (const char* c = p; *c; c++) s->s.push_back((wchar_t)*c);
+    *o = s; return S_OK;
+  }
   HRESULT WINAPI RegisterExtension(REFIID sid, IUnknown* e) override {
     if (!IsEqualGUID(sid, IID_IAIMPServiceAudioDecoders)) return E_FAIL;
     ext = e; e->AddRef(); return S_OK;

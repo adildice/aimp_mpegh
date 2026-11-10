@@ -33,7 +33,7 @@
 
 using namespace mmt::isobmff;
 
-static const wchar_t* kPluginName = L"MPEG-H 3D Audio decoder (mha1/mhm1) v1.0";
+static const wchar_t* kPluginName = L"MPEG-H 3D Audio decoder (mha1/mhm1) v1.1";
 static const wchar_t* kPluginAuthor = L"Built with Fraunhofer FDK MPEG-H Software";
 static const wchar_t* kPluginShort = L"Plays MPEG-H 3D Audio (mha1 / mhm1) tracks in MP4 / M4A files";
 static const wchar_t* kPluginFull =
@@ -53,17 +53,84 @@ struct Settings {
   bool readTags = true;
 };
 
-static std::wstring iniPath() {
+// Default settings file, written on first start if the installer did not copy one.
+static const char kDefaultIni[] =
+    "; Settings for the MPEG-H 3D Audio plugin for AIMP.\r\n"
+    "; Keep this file next to aimp_mpegh.dll. Changes apply to the next track you start.\r\n"
+    "\r\n"
+    "[MPEG-H]\r\n"
+    "\r\n"
+    "; Output speaker layout:\r\n"
+    ";   stereo  - 2.0 (default; works on headphones and any sound card)\r\n"
+    ";   5.1     - L R C LFE Ls Rs\r\n"
+    ";   7.1     - L R C LFE + side and back surrounds\r\n"
+    ";   9.1.6   - 16 channels: L R C LFE Lb Rb Ls Rs Lw Rw + top front, top rear, top middle pairs\r\n"
+    ";             (needs a 16-channel output device; AIMP itself may refuse more than 8 channels)\r\n"
+    ";   mono\r\n"
+    "; A raw MPEG CICP layout number is also accepted (advanced, e.g. 10 = quad).\r\n"
+    "Layout=stereo\r\n"
+    "\r\n"
+    "; Loudness normalisation target in LKFS, from -10 to -31.75.\r\n"
+    "; Leave empty for the decoder default (-24). Use -16 for a louder, \"music player\" level.\r\n"
+    "TargetLoudness=\r\n"
+    "\r\n"
+    "; Dynamic range control effect. Leave empty for the default (off unless needed to avoid clipping).\r\n"
+    ";   -1 off   1 late night   2 noisy environment   3 limited playback range\r\n"
+    ";    4 low playback level   5 dialog enhancement   6 general compression\r\n"
+    "DrcEffect=\r\n"
+    "\r\n"
+    "; 1 = the plugin reports title / artist / album etc. from the MP4 tags.\r\n"
+    "; 0 = leave tag reading entirely to AIMP (try this if tags or cover art look wrong).\r\n"
+    "ReadTags=1\r\n";
+
+static std::wstring g_iniPath; // resolved in resolveIniPath()
+
+static std::wstring dllDir() {
   wchar_t buf[MAX_PATH * 4] = {0};
   GetModuleFileNameW(g_module, buf, static_cast<DWORD>(sizeof(buf) / sizeof(buf[0]) - 1));
   std::wstring p(buf);
-  size_t dot = p.find_last_of(L'.');
   size_t slash = p.find_last_of(L"\\/");
-  if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) {
-    p.erase(dot);
-  }
-  return p + L".ini";
+  return slash == std::wstring::npos ? std::wstring() : p.substr(0, slash + 1);
 }
+
+static bool fileExists(const std::wstring& p) {
+  DWORD a = GetFileAttributesW(p.c_str());
+  return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static bool writeDefaultIni(const std::wstring& p) {
+  HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  DWORD written = 0;
+  BOOL ok = WriteFile(h, kDefaultIni, static_cast<DWORD>(sizeof(kDefaultIni) - 1), &written, nullptr);
+  CloseHandle(h);
+  return ok && written == sizeof(kDefaultIni) - 1;
+}
+
+// The settings file lives next to the DLL. If it is missing there (AIMP's package installer
+// copies only the binaries) and that folder is not writable, AIMP's profile folder is used.
+static void resolveIniPath(IAIMPCore* core) {
+  std::wstring nearDll = dllDir() + L"aimp_mpegh.ini";
+  std::wstring inProfile;
+  if (core) {
+    IAIMPString* s = nullptr;
+    if (SUCCEEDED(core->GetPath(AIMP_CORE_PATH_PROFILE, &s)) && s) {
+      inProfile.assign(s->GetData(), static_cast<size_t>(s->GetLength()));
+      s->Release();
+      if (!inProfile.empty()) {
+        if (inProfile.back() != L'\\' && inProfile.back() != L'/') inProfile += L'\\';
+        inProfile += L"aimp_mpegh.ini";
+      }
+    }
+  }
+  if (fileExists(nearDll)) g_iniPath = nearDll;
+  else if (!inProfile.empty() && fileExists(inProfile)) g_iniPath = inProfile;
+  else if (writeDefaultIni(nearDll)) g_iniPath = nearDll;
+  else if (!inProfile.empty() && writeDefaultIni(inProfile)) g_iniPath = inProfile;
+  else g_iniPath = nearDll;
+}
+
+static std::wstring iniPath() { return g_iniPath.empty() ? dllDir() + L"aimp_mpegh.ini" : g_iniPath; }
 
 static std::wstring trimLower(const wchar_t* s) {
   std::wstring v(s);
@@ -775,6 +842,7 @@ class CPlugin : public IAIMPPlugin {
     }
     g_core = core;
     g_core->AddRef();
+    resolveIniPath(core);
     CDecoderExtension* ext = new CDecoderExtension();
     HRESULT hr = core->RegisterExtension(IID_IAIMPServiceAudioDecoders,
                                          static_cast<IAIMPExtensionAudioDecoder*>(ext));
