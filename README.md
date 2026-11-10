@@ -21,9 +21,13 @@ If an MPEG-H file has a wrong extension (for example `.flac`), rename it to `.m4
 
 ## Settings
 
-Edit `aimp_mpegh.ini`. Changes apply to the next track you start. The file sits next to
-`aimp_mpegh.dll`; if it is missing, the plugin creates it on first start, next to the DLL or,
-when that folder is write-protected, in AIMP's profile folder (usually `%AppData%\AIMP`).
+In AIMP open *Preferences → Plugins*, select "MPEG-H 3D Audio decoder" and open its settings to
+choose the output layout, loudness target and dynamic range control. Changes apply to the next
+track you start.
+
+The values are stored in `aimp_mpegh.ini`, which can also be edited by hand. It sits next to
+`aimp_mpegh.dll`, or in AIMP's profile folder (usually `%AppData%\AIMP`) when the plugin folder
+is write-protected; the copy in the profile folder wins if both exist.
 
 | Key | Values |
 | --- | --- |

@@ -33,12 +33,12 @@
 
 using namespace mmt::isobmff;
 
-static const wchar_t* kPluginName = L"MPEG-H 3D Audio decoder (mha1/mhm1) v1.1";
+static const wchar_t* kPluginName = L"MPEG-H 3D Audio decoder (mha1/mhm1) v1.2";
 static const wchar_t* kPluginAuthor = L"Built with Fraunhofer FDK MPEG-H Software";
 static const wchar_t* kPluginShort = L"Plays MPEG-H 3D Audio (mha1 / mhm1) tracks in MP4 / M4A files";
 static const wchar_t* kPluginFull =
     L"Decodes MPEG-H 3D Audio, including 360 Reality Audio music files. "
-    L"Output layout is set in aimp_mpegh.ini next to the plugin DLL.";
+    L"Output layout and loudness are set in the plugin's settings dialog.";
 
 static HMODULE g_module = nullptr;
 static IAIMPCore* g_core = nullptr;
@@ -107,26 +107,29 @@ static bool writeDefaultIni(const std::wstring& p) {
   return ok && written == sizeof(kDefaultIni) - 1;
 }
 
-// The settings file lives next to the DLL. If it is missing there (AIMP's package installer
-// copies only the binaries) and that folder is not writable, AIMP's profile folder is used.
+static std::wstring g_profileIni; // AIMP profile folder candidate (always writable)
+
+// Settings file lookup: AIMP's profile folder first (that is where the settings dialog saves when
+// the plugin folder is write-protected), then next to the DLL. If neither exists a default file
+// is created next to the DLL or, failing that, in the profile folder.
 static void resolveIniPath(IAIMPCore* core) {
   std::wstring nearDll = dllDir() + L"aimp_mpegh.ini";
-  std::wstring inProfile;
+  g_profileIni.clear();
   if (core) {
     IAIMPString* s = nullptr;
     if (SUCCEEDED(core->GetPath(AIMP_CORE_PATH_PROFILE, &s)) && s) {
-      inProfile.assign(s->GetData(), static_cast<size_t>(s->GetLength()));
+      g_profileIni.assign(s->GetData(), static_cast<size_t>(s->GetLength()));
       s->Release();
-      if (!inProfile.empty()) {
-        if (inProfile.back() != L'\\' && inProfile.back() != L'/') inProfile += L'\\';
-        inProfile += L"aimp_mpegh.ini";
+      if (!g_profileIni.empty()) {
+        if (g_profileIni.back() != L'\\' && g_profileIni.back() != L'/') g_profileIni += L'\\';
+        g_profileIni += L"aimp_mpegh.ini";
       }
     }
   }
-  if (fileExists(nearDll)) g_iniPath = nearDll;
-  else if (!inProfile.empty() && fileExists(inProfile)) g_iniPath = inProfile;
+  if (!g_profileIni.empty() && fileExists(g_profileIni)) g_iniPath = g_profileIni;
+  else if (fileExists(nearDll)) g_iniPath = nearDll;
   else if (writeDefaultIni(nearDll)) g_iniPath = nearDll;
-  else if (!inProfile.empty() && writeDefaultIni(inProfile)) g_iniPath = inProfile;
+  else if (!g_profileIni.empty() && writeDefaultIni(g_profileIni)) g_iniPath = g_profileIni;
   else g_iniPath = nearDll;
 }
 
@@ -798,9 +801,189 @@ class CDecoderExtension : public IAIMPExtensionAudioDecoder,
 };
 
 // ------------------------------------------------------------------------------------
+// Settings dialog (Preferences -> Plugins -> settings button of this plugin)
+// ------------------------------------------------------------------------------------
+enum { IDC_LAYOUT = 101, IDC_LOUDNESS = 102, IDC_DRC = 103 };
+
+struct Choice {
+  const wchar_t* label;
+  const wchar_t* value; // what is written to the ini
+};
+
+static const Choice kLayouts[] = {
+    {L"Stereo (2.0)", L"stereo"}, {L"5.1 surround", L"5.1"}, {L"7.1 surround", L"7.1"},
+    {L"9.1.6 (16 channels)", L"9.1.6"}, {L"Mono", L"mono"}};
+static const Choice kLoudness[] = {
+    {L"Default (-24 LKFS)", L""}, {L"-16 LKFS (louder)", L"-16"}, {L"-18 LKFS", L"-18"},
+    {L"-20 LKFS", L"-20"}, {L"-23 LKFS", L"-23"}, {L"-27 LKFS", L"-27"},
+    {L"-31 LKFS (quiet, full dynamics)", L"-31"}};
+static const Choice kDrc[] = {
+    {L"Default (only to prevent clipping)", L""}, {L"Off", L"-1"}, {L"Late night", L"1"},
+    {L"Noisy environment", L"2"}, {L"Limited playback range", L"3"},
+    {L"Low playback level", L"4"}, {L"Dialog enhancement", L"5"}, {L"General compression", L"6"}};
+
+static std::wstring iniValue(const wchar_t* key, const wchar_t* def) {
+  wchar_t buf[128];
+  GetPrivateProfileStringW(L"MPEG-H", key, def, buf, 127, iniPath().c_str());
+  return trimLower(buf);
+}
+
+// Stores the three values. Falls back to the profile folder when the current file is read-only.
+static bool saveSettings(const std::wstring& layout, const std::wstring& loud, const std::wstring& drc) {
+  auto writeAll = [&](const std::wstring& path) {
+    return WritePrivateProfileStringW(L"MPEG-H", L"Layout", layout.c_str(), path.c_str()) &&
+           WritePrivateProfileStringW(L"MPEG-H", L"TargetLoudness", loud.c_str(), path.c_str()) &&
+           WritePrivateProfileStringW(L"MPEG-H", L"DrcEffect", drc.c_str(), path.c_str());
+  };
+  std::wstring cur = iniPath();
+  if (writeAll(cur)) {
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, cur.c_str()); // flush
+    return true;
+  }
+  if (g_profileIni.empty() || g_profileIni == cur) return false;
+  if (!fileExists(g_profileIni)) {
+    if (!CopyFileW(cur.c_str(), g_profileIni.c_str(), TRUE)) writeDefaultIni(g_profileIni);
+  }
+  if (!writeAll(g_profileIni)) return false;
+  WritePrivateProfileStringW(nullptr, nullptr, nullptr, g_profileIni.c_str());
+  g_iniPath = g_profileIni;
+  return true;
+}
+
+template <size_t N>
+static void fillCombo(HWND dlg, int id, const Choice (&items)[N], const std::wstring& current,
+                      const wchar_t* customFmt) {
+  HWND cb = GetDlgItem(dlg, id);
+  int sel = -1;
+  for (size_t i = 0; i < N; i++) {
+    SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(items[i].label));
+    if (current == items[i].value) sel = static_cast<int>(i);
+  }
+  if (sel < 0) { // value typed by hand into the ini: keep it selectable
+    wchar_t label[160];
+    _snwprintf(label, 159, customFmt, current.c_str());
+    label[159] = 0;
+    sel = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label)));
+  }
+  SendMessageW(cb, CB_SETCURSEL, static_cast<WPARAM>(sel), 0);
+}
+
+template <size_t N>
+static std::wstring comboValue(HWND dlg, int id, const Choice (&items)[N], const std::wstring& current) {
+  LRESULT sel = SendMessageW(GetDlgItem(dlg, id), CB_GETCURSEL, 0, 0);
+  if (sel >= 0 && static_cast<size_t>(sel) < N) return items[sel].value;
+  return current; // the "custom" entry
+}
+
+struct DlgState {
+  std::wstring layout, loud, drc;
+};
+
+static INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
+  switch (msg) {
+    case WM_INITDIALOG: {
+      DlgState* st = reinterpret_cast<DlgState*>(lp);
+      SetWindowLongPtrW(dlg, DWLP_USER, static_cast<LONG_PTR>(lp));
+      st->layout = iniValue(L"Layout", L"stereo");
+      if (st->layout.empty() || st->layout == L"2.0") st->layout = L"stereo";
+      if (st->layout == L"1.0") st->layout = L"mono";
+      st->loud = iniValue(L"TargetLoudness", L"");
+      st->drc = iniValue(L"DrcEffect", L"");
+      fillCombo(dlg, IDC_LAYOUT, kLayouts, st->layout, L"Custom layout (CICP %ls)");
+      fillCombo(dlg, IDC_LOUDNESS, kLoudness, st->loud, L"Custom (%ls LKFS)");
+      fillCombo(dlg, IDC_DRC, kDrc, st->drc, L"Custom (%ls)");
+      return TRUE;
+    }
+    case WM_COMMAND:
+      if (LOWORD(wp) == IDOK) {
+        DlgState* st = reinterpret_cast<DlgState*>(GetWindowLongPtrW(dlg, DWLP_USER));
+        bool ok = saveSettings(comboValue(dlg, IDC_LAYOUT, kLayouts, st->layout),
+                               comboValue(dlg, IDC_LOUDNESS, kLoudness, st->loud),
+                               comboValue(dlg, IDC_DRC, kDrc, st->drc));
+        if (!ok)
+          MessageBoxW(dlg, L"The settings could not be saved (the settings file is write-protected).",
+                      L"MPEG-H 3D Audio decoder", MB_OK | MB_ICONWARNING);
+        EndDialog(dlg, ok ? IDOK : IDCANCEL);
+        return TRUE;
+      }
+      if (LOWORD(wp) == IDCANCEL) {
+        EndDialog(dlg, IDCANCEL);
+        return TRUE;
+      }
+      break;
+    case WM_CLOSE:
+      EndDialog(dlg, IDCANCEL);
+      return TRUE;
+  }
+  return FALSE;
+}
+
+// In-memory dialog template (no .rc file needed).
+class DlgTemplate {
+ public:
+  DlgTemplate(const wchar_t* title, short w, short h) {
+    put<DWORD>(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU); // style
+    put<DWORD>(0);        // extended style
+    put<WORD>(0);         // item count, patched in data()
+    put<short>(0); put<short>(0); put<short>(w); put<short>(h);
+    put<WORD>(0);         // no menu
+    put<WORD>(0);         // default class
+    str(title);
+    put<WORD>(8);         // font size
+    str(L"MS Shell Dlg");
+  }
+  void item(WORD cls, const wchar_t* text, WORD id, DWORD style, short x, short y, short w, short h) {
+    while (m_buf.size() % 4) m_buf.push_back(0);
+    put<DWORD>(style | WS_CHILD | WS_VISIBLE);
+    put<DWORD>(0);
+    put<short>(x); put<short>(y); put<short>(w); put<short>(h);
+    put<WORD>(id);
+    put<WORD>(0xFFFF); put<WORD>(cls);
+    str(text);
+    put<WORD>(0); // no creation data
+    m_count++;
+  }
+  const DLGTEMPLATE* data() {
+    memcpy(m_buf.data() + 8, &m_count, sizeof(WORD));
+    return reinterpret_cast<const DLGTEMPLATE*>(m_buf.data());
+  }
+
+ private:
+  template <class T> void put(T v) {
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&v);
+    m_buf.insert(m_buf.end(), p, p + sizeof(T));
+  }
+  void str(const wchar_t* s) {
+    for (;; s++) { put<WORD>(static_cast<WORD>(*s)); if (!*s) break; }
+  }
+  std::vector<uint8_t> m_buf;
+  WORD m_count = 0;
+};
+
+static void showSettingsDialog(HWND parent) {
+  const WORD BUTTON = 0x0080, STATIC = 0x0082, COMBO = 0x0085;
+  const DWORD comboStyle = CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP;
+  DlgTemplate t(L"MPEG-H 3D Audio decoder", 250, 122);
+  t.item(STATIC, L"Output layout:", 0xFFFF, SS_LEFT, 10, 12, 80, 10);
+  t.item(COMBO, L"", IDC_LAYOUT, comboStyle, 92, 10, 148, 120);
+  t.item(STATIC, L"Loudness target:", 0xFFFF, SS_LEFT, 10, 32, 80, 10);
+  t.item(COMBO, L"", IDC_LOUDNESS, comboStyle, 92, 30, 148, 140);
+  t.item(STATIC, L"Dynamic range control:", 0xFFFF, SS_LEFT, 10, 52, 80, 10);
+  t.item(COMBO, L"", IDC_DRC, comboStyle, 92, 50, 148, 140);
+  t.item(STATIC,
+         L"Changes apply to the next track you start. Surround layouts need a sound "
+         L"device set up for that many channels.",
+         0xFFFF, SS_LEFT, 10, 72, 230, 20);
+  t.item(BUTTON, L"OK", IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP, 135, 100, 50, 14);
+  t.item(BUTTON, L"Cancel", IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP, 190, 100, 50, 14);
+  DlgState st;
+  DialogBoxIndirectParamW(g_module, t.data(), parent, settingsDlgProc, reinterpret_cast<LPARAM>(&st));
+}
+
+// ------------------------------------------------------------------------------------
 // Plugin
 // ------------------------------------------------------------------------------------
-class CPlugin : public IAIMPPlugin {
+class CPlugin : public IAIMPPlugin, public IAIMPExternalSettingsDialog {
  public:
   CPlugin() : m_ref(1) {}
   virtual ~CPlugin() {}
@@ -812,8 +995,21 @@ class CPlugin : public IAIMPPlugin {
       AddRef();
       return S_OK;
     }
+    if (IsEqualGUID(riid, IID_IAIMPExternalSettingsDialog)) {
+      *obj = static_cast<IAIMPExternalSettingsDialog*>(this);
+      AddRef();
+      return S_OK;
+    }
     *obj = nullptr;
     return E_NOINTERFACE;
+  }
+
+  // IAIMPExternalSettingsDialog
+  void WINAPI Show(HWND parent) override {
+    try {
+      showSettingsDialog(parent);
+    } catch (...) {
+    }
   }
   ULONG WINAPI AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&m_ref)); }
   ULONG WINAPI Release() override {

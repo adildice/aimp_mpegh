@@ -127,6 +127,33 @@ int main(int argc, char** argv) {
   Core* core = new Core();
   if (FAILED(plugin->Initialize(core)) || !core->ext) { printf("FAIL initialize\n"); return 1; }
 
+  if (argc > 3 && !strcmp(argv[2], "--dialog")) {
+    // usage: test_host plugin.dll --dialog <layoutIndex> <loudIndex> <drcIndex> | cancel
+    IAIMPExternalSettingsDialog* dlg = nullptr;
+    if (FAILED(plugin->QueryInterface(IID_IAIMPExternalSettingsDialog, (void**)&dlg))) { printf("FAIL QI settings dialog\n"); return 1; }
+    static int idx[3]; static bool cancel; cancel = !strcmp(argv[3], "cancel");
+    if (!cancel) for (int i = 0; i < 3; i++) idx[i] = atoi(argv[3 + i]);
+    CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+      HWND w = nullptr;
+      for (int i = 0; i < 200 && !w; i++) { Sleep(50); w = FindWindowW(nullptr, L"MPEG-H 3D Audio decoder"); }
+      if (!w) { printf("FAIL dialog window not found\n"); ExitProcess(1); }
+      for (int i = 0; i < 3; i++) {
+        HWND cb = GetDlgItem(w, 101 + i);
+        wchar_t txt[200] = {0}; int cur = (int)SendMessageW(cb, CB_GETCURSEL, 0, 0);
+        SendMessageW(cb, CB_GETLBTEXT, cur, (LPARAM)txt);
+        printf("combo %d: %d items, selected %d '%ls'\n", 101 + i, (int)SendMessageW(cb, CB_GETCOUNT, 0, 0), cur, txt);
+        if (!cancel && idx[i] >= 0) SendMessageW(cb, CB_SETCURSEL, idx[i], 0);
+      }
+      if (getenv("TEST_HOLD")) Sleep(atoi(getenv("TEST_HOLD")));
+      PostMessageW(w, WM_COMMAND, cancel ? IDCANCEL : IDOK, 0);
+      return 0;
+    }, nullptr, 0, nullptr);
+    dlg->Show(nullptr);
+    printf("dialog closed\n");
+    dlg->Release();
+    return 0;
+  }
+
   IAIMPExtensionAudioDecoder* ext = nullptr;
   IAIMPExtensionAudioDecoderPriority* prio = nullptr;
   if (FAILED(core->ext->QueryInterface(IID_IAIMPExtensionAudioDecoder, (void**)&ext))) { printf("FAIL QI ext\n"); return 1; }
