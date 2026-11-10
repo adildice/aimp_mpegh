@@ -21,23 +21,30 @@ If an MPEG-H file has a wrong extension (for example `.flac`), rename it to `.m4
 
 ## Settings
 
-In AIMP open *Preferences → Plugins*, select "MPEG-H 3D Audio decoder" and open its settings to
-choose the output layout, loudness target and dynamic range control. Changes apply to the next
-track you start.
+In AIMP open *Preferences → Plugins*, select "MPEG-H 3D Audio decoder" and open its settings.
+There you choose:
 
-The values are stored in `aimp_mpegh.ini`, which can also be edited by hand. It sits next to
-`aimp_mpegh.dll`, or in AIMP's profile folder (usually `%AppData%\AIMP`) when the plugin folder
-is write-protected; the copy in the profile folder wins if both exist.
+- **Output layout:** Stereo, 5.1, 7.1, 9.1.6 or Mono
+- **Loudness target**
+- **Dynamic range control**
+
+Changes apply to the next track you start. Surround layouts need a sound device set up for
+that many channels. Stereo, 5.1 and 7.1 are confirmed working in AIMP; `9.1.6` outputs 16
+channels (L R C LFE Lb Rb Ls Rs Lw Rw Tfl Tfr Trl Trr Tml Tmr) and is untested in AIMP.
+
+### Advanced: the settings file
+
+You normally don't need this. The settings window saves its values to `aimp_mpegh.ini`, which
+can also be edited by hand. It sits next to `aimp_mpegh.dll`, or in AIMP's profile folder
+(usually `%AppData%\AIMP`) when the plugin folder is write-protected; the copy in the profile
+folder wins if both exist.
 
 | Key | Values |
 | --- | --- |
 | `Layout` | `stereo` (default), `5.1`, `7.1`, `9.1.6`, `mono`, or a raw CICP layout number |
 | `TargetLoudness` | loudness target in LKFS, e.g. `-16`; empty = decoder default |
 | `DrcEffect` | dynamic range control preset `-1`..`6`; empty = default |
-| `ReadTags` | `1` = plugin reports MP4 tags, `0` = leave tags to AIMP |
-
-`9.1.6` outputs 16 channels (L R C LFE Lb Rb Ls Rs Lw Rw Tfl Tfr Trl Trr Tml Tmr). It needs a
-16-channel output device, and it is untested whether AIMP accepts more than 8 channels.
+| `ReadTags` | `1` = plugin reports MP4 tags, `0` = leave tags to AIMP (only settable here) |
 
 ## Limits
 
