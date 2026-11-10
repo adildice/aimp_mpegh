@@ -6,8 +6,8 @@ Plays MPEG-H 3D Audio tracks (`mha1` / `mhm1`) stored in MP4 / M4A files, for ex
 360 Reality Audio music. Files that are not MPEG-H are ignored, so AIMP keeps playing
 them with its own decoders.
 
-> Status: decoding and seeking are verified against Fraunhofer's reference decoder through a
-> small test host (`test/test_host.cpp`). Testing inside AIMP itself is still in progress.
+> Status: works in AIMP 5.x (64-bit). Decoding and seeking are also verified against
+> Fraunhofer's reference decoder through a small test host (`test/test_host.cpp`).
 
 ## Install
 
