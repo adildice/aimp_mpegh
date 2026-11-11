@@ -1,6 +1,6 @@
 # aimp_mpegh
 
-MPEG-H 3D Audio decoder plugin for [AIMP](https://www.aimp.ru) 5.x (Windows, 64-bit).
+MPEG-H 3D Audio decoder plugin for [AIMP](https://www.aimp.ru) 5.x (Windows, 64-bit and 32-bit).
 
 Plays MPEG-H 3D Audio tracks (`mha1` / `mhm1`) stored in MP4 / M4A files, for example
 360 Reality Audio music. Files that are not MPEG-H are ignored, so AIMP keeps playing
@@ -42,19 +42,24 @@ live in `aimp_mpegh.ini`, usually in AIMP's profile folder, `%AppData%\AIMP`.)
 ## Build (Linux, cross-compiling with mingw-w64)
 
 ```sh
-sudo apt install g++-mingw-w64-x86-64-posix cmake
+sudo apt install g++-mingw-w64-x86-64-posix g++-mingw-w64-i686-posix cmake
 mkdir deps && cd deps
 git clone https://github.com/Fraunhofer-IIS/mpeghdec.git
-cmake -S mpeghdec -B build -DCMAKE_TOOLCHAIN_FILE=../mingw.cmake \
-      -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
-cmake --build build -j8     # if ilo fails: apply ../ilo-mingw.patch in build/_deps/ilo-src, rebuild
+# 64-bit libraries -> deps/build, 32-bit libraries -> deps/build32
+cmake -S mpeghdec -B build   -DCMAKE_TOOLCHAIN_FILE=../mingw.cmake   -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+cmake -S mpeghdec -B build32 -DCMAKE_TOOLCHAIN_FILE=../mingw32.cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+cmake --build build -j8 && cmake --build build32 -j8
+# if ilo fails to compile: apply ../ilo-mingw.patch in build/_deps/ilo-src (and build32/_deps/ilo-src), rebuild
 cd ..
 # put the AIMP SDK C++ headers (apiPlugin.h, apiDecoders.h, ...) into ./aimp_sdk
-sh build.sh                 # -> out/aimp_mpegh.dll, out/test_host.exe
+sh build.sh                 # -> out/x64 and out/x86: aimp_mpegh.dll, test_host.exe
 ```
 
 `test_host.exe aimp_mpegh.dll file.m4a out.wav` loads the DLL through the AIMP SDK interfaces,
 decodes the file to WAV and runs seek checks.
+
+AIMP package layout: the 32-bit DLL goes to `aimp_mpegh\aimp_mpegh.dll`, the 64-bit DLL to
+`aimp_mpegh\x64\aimp_mpegh.dll`.
 
 ## Licences
 

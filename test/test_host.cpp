@@ -115,6 +115,24 @@ static void writeWav(const char* path, const std::vector<uint8_t>& pcm, int sr, 
   fwrite("data", 1, 4, f); fwrite(&n, 4, 1, f); fwrite(pcm.data(), 1, n, f); fclose(f);
 }
 
+static int g_idx[3];
+static bool g_cancel;
+static DWORD WINAPI dlgThread(LPVOID) {
+      HWND w = nullptr;
+      for (int i = 0; i < 200 && !w; i++) { Sleep(50); w = FindWindowW(nullptr, L"MPEG-H 3D Audio decoder"); }
+      if (!w) { printf("FAIL dialog window not found\n"); ExitProcess(1); }
+      for (int i = 0; i < 3; i++) {
+        HWND cb = GetDlgItem(w, 101 + i);
+        wchar_t txt[200] = {0}; int cur = (int)SendMessageW(cb, CB_GETCURSEL, 0, 0);
+        SendMessageW(cb, CB_GETLBTEXT, cur, (LPARAM)txt);
+        printf("combo %d: %d items, selected %d '%ls'\n", 101 + i, (int)SendMessageW(cb, CB_GETCOUNT, 0, 0), cur, txt);
+        if (!g_cancel && g_idx[i] >= 0) SendMessageW(cb, CB_SETCURSEL, g_idx[i], 0);
+      }
+      if (getenv("TEST_HOLD")) Sleep(atoi(getenv("TEST_HOLD")));
+      PostMessageW(w, WM_COMMAND, g_cancel ? IDCANCEL : IDOK, 0);
+      return 0;
+}
+
 int main(int argc, char** argv) {
   if (argc < 3) { printf("usage: test_host plugin.dll input [out.wav]\n"); return 2; }
   HMODULE h = LoadLibraryA(argv[1]);
@@ -131,23 +149,9 @@ int main(int argc, char** argv) {
     // usage: test_host plugin.dll --dialog <layoutIndex> <loudIndex> <drcIndex> | cancel
     IAIMPExternalSettingsDialog* dlg = nullptr;
     if (FAILED(plugin->QueryInterface(IID_IAIMPExternalSettingsDialog, (void**)&dlg))) { printf("FAIL QI settings dialog\n"); return 1; }
-    static int idx[3]; static bool cancel; cancel = !strcmp(argv[3], "cancel");
-    if (!cancel) for (int i = 0; i < 3; i++) idx[i] = atoi(argv[3 + i]);
-    CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-      HWND w = nullptr;
-      for (int i = 0; i < 200 && !w; i++) { Sleep(50); w = FindWindowW(nullptr, L"MPEG-H 3D Audio decoder"); }
-      if (!w) { printf("FAIL dialog window not found\n"); ExitProcess(1); }
-      for (int i = 0; i < 3; i++) {
-        HWND cb = GetDlgItem(w, 101 + i);
-        wchar_t txt[200] = {0}; int cur = (int)SendMessageW(cb, CB_GETCURSEL, 0, 0);
-        SendMessageW(cb, CB_GETLBTEXT, cur, (LPARAM)txt);
-        printf("combo %d: %d items, selected %d '%ls'\n", 101 + i, (int)SendMessageW(cb, CB_GETCOUNT, 0, 0), cur, txt);
-        if (!cancel && idx[i] >= 0) SendMessageW(cb, CB_SETCURSEL, idx[i], 0);
-      }
-      if (getenv("TEST_HOLD")) Sleep(atoi(getenv("TEST_HOLD")));
-      PostMessageW(w, WM_COMMAND, cancel ? IDCANCEL : IDOK, 0);
-      return 0;
-    }, nullptr, 0, nullptr);
+    g_cancel = !strcmp(argv[3], "cancel");
+    if (!g_cancel) for (int i = 0; i < 3; i++) g_idx[i] = atoi(argv[3 + i]);
+    CreateThread(nullptr, 0, dlgThread, nullptr, 0, nullptr);
     dlg->Show(nullptr);
     printf("dialog closed\n");
     dlg->Release();
