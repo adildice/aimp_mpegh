@@ -33,7 +33,7 @@
 
 using namespace mmt::isobmff;
 
-static const wchar_t* kPluginName = L"MPEG-H 3D Audio decoder (mha1/mhm1) v1.0";
+static const wchar_t* kPluginName = L"MPEG-H 3D Audio decoder (mha1/mhm1) v1.1";
 static const wchar_t* kPluginAuthor = L"Built with Fraunhofer FDK MPEG-H Software";
 static const wchar_t* kPluginShort = L"Plays MPEG-H 3D Audio (mha1 / mhm1) tracks in MP4 / M4A files";
 static const wchar_t* kPluginFull =
