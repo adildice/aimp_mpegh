@@ -12,8 +12,8 @@ keeps playing them with its own decoders.
 
 ## Install
 
-1. Download `aimp_mpegh_1.2.aimppack` (or `aimp_mpegh_1.2.zip`, same contents) from
-   [Releases](../../releases).
+1. Download the `.aimppack` file (or the `.zip`, same contents) from the latest
+   [release](../../releases/latest).
 2. In AIMP open *Preferences → Plugins → Install*, pick the file and restart AIMP.
 3. *Preferences → Plugins* should now list "MPEG-H 3D Audio decoder".
 
@@ -95,7 +95,7 @@ aimp_mpegh/README.txt, LICENSE-*.txt
 
 ### Build (Linux, cross-compiling with mingw-w64)
 
-Versions up to 1.1 were built this way. It is untested with the 1.2 sources.
+Versions up to 1.1 were built this way. It is untested with the current sources.
 
 ```sh
 sudo apt install g++-mingw-w64-x86-64-posix g++-mingw-w64-i686-posix cmake
