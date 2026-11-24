@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -22,6 +23,7 @@
 #include "apiPlugin.h"
 #include "apiDecoders.h"
 #include "apiFileManager.h"
+#include "apiMUI.h"
 
 #include "ilo/memory.h"
 #include "mmtisobmff/types.h"
@@ -30,10 +32,11 @@
 #include "mmtisobmff/reader/reader.h"
 #include "mmtisobmff/reader/trackreader.h"
 #include "mpeghdecoder.h"
+#include "binaural.h"
 
 using namespace mmt::isobmff;
 
-static const wchar_t* kPluginName = L"MPEG-H 3D Audio decoder (mha1/mhm1) v1.1";
+static const wchar_t* kPluginName = L"MPEG-H 3D Audio decoder (mha1/mhm1) v1.2";
 static const wchar_t* kPluginAuthor = L"Built with Fraunhofer FDK MPEG-H Software";
 static const wchar_t* kPluginShort = L"Plays MPEG-H 3D Audio (mha1 / mhm1) tracks in MP4 / M4A files";
 static const wchar_t* kPluginFull =
@@ -48,6 +51,8 @@ static IAIMPCore* g_core = nullptr;
 // ------------------------------------------------------------------------------------
 struct Settings {
   int cicp = 2;            // target loudspeaker layout (CICP index)
+  bool headphones = false; // decode to 7.1.4 and render it binaurally to two channels
+  int room = 30;           // room sound for headphones, 0..100
   int targetLoudness = -1; // decoder units (-0.25 LU steps, 40..127), -1 = decoder default
   int drcEffect = -100;    // -1..6, -100 = decoder default
   bool readTags = true;
@@ -61,14 +66,18 @@ static const char kDefaultIni[] =
     "[MPEG-H]\r\n"
     "\r\n"
     "; Output speaker layout:\r\n"
-    ";   stereo  - 2.0 (default; works on headphones and any sound card)\r\n"
+    ";   headphones - Headphones (3D): the full 3D mix rendered for headphones (default)\r\n"
+    ";   stereo  - 2.0 plain speaker downmix (works on any sound card)\r\n"
     ";   5.1     - L R C LFE Ls Rs\r\n"
     ";   7.1     - L R C LFE + side and back surrounds\r\n"
     ";   9.1.6   - 16 channels: L R C LFE Lb Rb Ls Rs Lw Rw + top front, top rear, top middle pairs\r\n"
     ";             (needs a 16-channel output device; AIMP itself may refuse more than 8 channels)\r\n"
     ";   mono\r\n"
     "; A raw MPEG CICP layout number is also accepted (advanced, e.g. 10 = quad).\r\n"
-    "Layout=stereo\r\n"
+    "Layout=headphones\r\n"
+    "\r\n"
+    "; Room sound for Headphones (3D), from 0 (dry) to 100. Default 30.\r\n"
+    "HeadphoneRoom=30\r\n"
     "\r\n"
     "; Loudness normalisation target in LKFS, from -10 to -31.75.\r\n"
     "; Leave empty for the decoder default (-24). Use -16 for a louder, \"music player\" level.\r\n"
@@ -152,9 +161,12 @@ static Settings loadSettings() {
   std::wstring ini = iniPath();
   wchar_t buf[128];
 
-  GetPrivateProfileStringW(L"MPEG-H", L"Layout", L"stereo", buf, 127, ini.c_str());
+  GetPrivateProfileStringW(L"MPEG-H", L"Layout", L"headphones", buf, 127, ini.c_str());
   std::wstring v = trimLower(buf);
-  if (v == L"mono" || v == L"1.0") s.cicp = 1;
+  if (v == L"headphones" || v == L"binaural" || v == L"3d") {
+    s.cicp = 19; // 7.1.4, rendered to two channels afterwards
+    s.headphones = true;
+  } else if (v == L"mono" || v == L"1.0") s.cicp = 1;
   else if (v == L"stereo" || v == L"2.0" || v.empty()) s.cicp = 2;
   else if (v == L"5.1") s.cicp = 6;
   else if (v == L"7.1") s.cicp = 12;
@@ -163,6 +175,9 @@ static Settings loadSettings() {
     int n = _wtoi(v.c_str());
     s.cicp = (n >= 1 && n <= 500) ? n : 2;
   }
+
+  int room = static_cast<int>(GetPrivateProfileIntW(L"MPEG-H", L"HeadphoneRoom", 30, ini.c_str()));
+  s.room = std::max(0, std::min(100, room));
 
   GetPrivateProfileStringW(L"MPEG-H", L"TargetLoudness", L"", buf, 127, ini.c_str());
   v = trimLower(buf);
@@ -449,7 +464,12 @@ class CMpeghDecoder : public IAIMPAudioDecoder {
     if (!m_track) return false;
 
     m_dec = mpeghdecoder_init(m_settings.cicp);
+    if (!m_dec && m_settings.headphones) {
+      m_settings.cicp = 12; // no 7.1.4 renderer: build the 3D sound from 7.1 instead
+      m_dec = mpeghdecoder_init(12);
+    }
     if (!m_dec && m_settings.cicp != 2) {
+      m_settings.headphones = false;
       m_settings.cicp = 2; // unsupported layout requested -> fall back to stereo
       m_dec = mpeghdecoder_init(2);
     }
@@ -470,6 +490,7 @@ class CMpeghDecoder : public IAIMPAudioDecoder {
 
     m_sample = CSample{m_info.maxSampleSize};
     m_out.resize(kMaxChannels * kMaxFrame);
+    if (m_settings.headphones) m_raw.resize(kMaxChannels * kMaxFrame);
 
     // Decode the first frame so that the real output format is known.
     m_sampleInfo = m_track->nextSample(m_sample);
@@ -582,6 +603,7 @@ class CMpeghDecoder : public IAIMPAudioDecoder {
       m_pending = 0;
       m_pendingOff = 0;
       mpeghdecoder_flush(m_dec);
+      if (m_settings.headphones) m_bin.reset();
 
       m_posFrames = target;
       if (!m_haveSample) {
@@ -660,19 +682,35 @@ class CMpeghDecoder : public IAIMPAudioDecoder {
     while (!m_eof) {
       MPEGH_DECODER_OUTPUT_INFO oi;
       MPEGH_DECODER_ERROR st =
-          mpeghdecoder_getSamples(m_dec, m_out.data(), static_cast<uint32_t>(m_out.size()), &oi);
+          mpeghdecoder_getSamples(m_dec, m_settings.headphones ? m_raw.data() : m_out.data(),
+                                  static_cast<uint32_t>(m_out.size()), &oi);
       if (st == MPEGH_DEC_OK) {
         if (oi.numChannels <= 0 || oi.numSamplesPerChannel <= 0) continue;
+        if (m_settings.headphones) {
+          if (m_srcChannels == 0) {
+            const binaural::Speaker* spk = oi.numChannels == 12 ? binaural::kCicp19
+                                         : oi.numChannels == 8  ? binaural::kCicp12
+                                                                : nullptr;
+            if (!spk) { m_eof = true; return false; }
+            m_srcChannels = oi.numChannels;
+            m_bin.setup(spk, m_srcChannels, oi.sampleRate, m_settings.room / 100.0f);
+          } else if (oi.numChannels != m_srcChannels) {
+            m_eof = true;
+            return false;
+          }
+        }
+        int outCh = m_settings.headphones ? 2 : oi.numChannels;
         if (m_channels == 0) {
-          m_channels = oi.numChannels;
+          m_channels = outCh;
           m_sampleRate = oi.sampleRate;
-        } else if (oi.numChannels != m_channels || oi.sampleRate != m_sampleRate) {
+        } else if (outCh != m_channels || oi.sampleRate != m_sampleRate) {
           m_eof = true; // output format changed mid-stream: not representable, stop cleanly
           return false;
         }
         m_lastTicks = oi.ticks;
         m_pending = oi.numSamplesPerChannel;
-        reorder(m_pending);
+        if (m_settings.headphones) m_bin.process(m_raw.data(), m_out.data(), m_pending);
+        else reorder(m_pending);
         return true;
       }
       if (st != MPEGH_DEC_FEED_DATA) {
@@ -731,6 +769,9 @@ class CMpeghDecoder : public IAIMPAudioDecoder {
   bool m_eof = false;
 
   std::vector<int32_t> m_out;
+  std::vector<int32_t> m_raw; // decoder output before headphone rendering
+  binaural::Renderer m_bin;
+  int m_srcChannels = 0;
   int m_pending = 0;    // frames available in m_out
   int m_pendingOff = 0; // frames already consumed from m_out
   uint64_t m_lastTicks = 0;
@@ -803,24 +844,229 @@ class CDecoderExtension : public IAIMPExtensionAudioDecoder,
 // ------------------------------------------------------------------------------------
 // Settings dialog (Preferences -> Plugins -> settings button of this plugin)
 // ------------------------------------------------------------------------------------
-enum { IDC_LAYOUT = 101, IDC_LOUDNESS = 102, IDC_DRC = 103 };
+enum {
+  IDC_LAYOUT = 101, IDC_LOUDNESS = 102, IDC_DRC = 103, IDC_ROOM = 104, IDC_TAGS = 105,
+  IDC_LANG = 106, IDS_LAYOUT = 201, IDS_ROOM = 202, IDS_LOUD = 203, IDS_DRC = 204,
+  IDS_LANG = 205, IDS_NOTE = 206
+};
 
+// ------------------------------------------------------------------------------------
+// Translations
+//
+// Dialog texts live in Langs\*.ini next to the plugin (or one folder up, for the 64-bit DLL
+// in x64\). Each file is UTF-8 or UTF-16 and looks like:
+//   [Info]
+//   Name=Русский               ; shown in the Language list
+//   AIMP=russian,русский       ; AIMP language names this file is picked for (Automatic)
+//   [Strings]
+//   Title=Декодер MPEG-H 3D Audio
+//   ...
+// Missing keys, or a missing folder, fall back to the English built into the plugin.
+// ------------------------------------------------------------------------------------
+struct LangFile {
+  std::wstring id;                // file name without .ini, e.g. "russian"
+  std::wstring name;              // display name
+  std::vector<std::wstring> aimp; // lower-case AIMP language names
+  std::map<std::wstring, std::wstring> strings;
+};
+
+static std::wstring utf8ToWide(const char* p, size_t n) {
+  int len = MultiByteToWideChar(CP_UTF8, 0, p, static_cast<int>(n), nullptr, 0);
+  std::wstring w(static_cast<size_t>(len), L'\0');
+  if (len > 0) MultiByteToWideChar(CP_UTF8, 0, p, static_cast<int>(n), &w[0], len);
+  return w;
+}
+
+static std::wstring readTextFile(const std::wstring& path) {
+  HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return std::wstring();
+  DWORD size = GetFileSize(h, nullptr), got = 0;
+  std::vector<char> buf(size > 1 << 20 ? 0 : size);
+  if (!buf.empty()) ReadFile(h, buf.data(), size, &got, nullptr);
+  CloseHandle(h);
+  buf.resize(got);
+  if (buf.size() >= 2 && static_cast<uint8_t>(buf[0]) == 0xFF && static_cast<uint8_t>(buf[1]) == 0xFE)
+    return std::wstring(reinterpret_cast<const wchar_t*>(buf.data() + 2), (buf.size() - 2) / 2);
+  size_t off = (buf.size() >= 3 && static_cast<uint8_t>(buf[0]) == 0xEF &&
+                static_cast<uint8_t>(buf[1]) == 0xBB && static_cast<uint8_t>(buf[2]) == 0xBF) ? 3 : 0;
+  return utf8ToWide(buf.data() + off, buf.size() - off);
+}
+
+static std::wstring trimW(const std::wstring& s) {
+  size_t a = 0, b = s.size();
+  while (a < b && iswspace(s[a])) a++;
+  while (b > a && iswspace(s[b - 1])) b--;
+  return s.substr(a, b - a);
+}
+
+static std::wstring lowerW(std::wstring s) {
+  for (auto& ch : s) ch = static_cast<wchar_t>(towlower(ch));
+  return s;
+}
+
+static bool parseLangFile(const std::wstring& path, LangFile& lf) {
+  std::wstring text = readTextFile(path);
+  if (text.empty()) return false;
+  std::wstring section;
+  size_t pos = 0;
+  while (pos < text.size()) {
+    size_t nl = text.find(L'\n', pos);
+    std::wstring line = trimW(text.substr(pos, nl == std::wstring::npos ? std::wstring::npos : nl - pos));
+    pos = nl == std::wstring::npos ? text.size() : nl + 1;
+    if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
+    if (line[0] == L'[') {
+      section = lowerW(trimW(line.substr(1, line.find(L']') - 1)));
+      continue;
+    }
+    size_t eq = line.find(L'=');
+    if (eq == std::wstring::npos) continue;
+    std::wstring key = trimW(line.substr(0, eq)), val = trimW(line.substr(eq + 1));
+    // "\n" in a value means a line break
+    for (size_t i = 0; (i = val.find(L"\\n", i)) != std::wstring::npos;) val.replace(i, 2, L"\n");
+    if (section == L"info") {
+      std::wstring k = lowerW(key);
+      if (k == L"name") lf.name = val;
+      else if (k == L"aimp") {
+        std::wstring v = lowerW(val);
+        size_t s = 0;
+        while (s <= v.size()) {
+          size_t c = v.find(L',', s);
+          std::wstring part = trimW(v.substr(s, c == std::wstring::npos ? std::wstring::npos : c - s));
+          if (!part.empty()) lf.aimp.push_back(part);
+          if (c == std::wstring::npos) break;
+          s = c + 1;
+        }
+      }
+    } else if (section == L"strings") {
+      lf.strings[key] = val;
+    }
+  }
+  return !lf.strings.empty();
+}
+
+static std::wstring langsDir() {
+  std::wstring here = dllDir() + L"Langs\\";
+  DWORD a = GetFileAttributesW(here.c_str());
+  if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) return here;
+  return dllDir() + L"..\\Langs\\"; // 64-bit DLL lives in x64\ below the shared folder
+}
+
+static std::vector<LangFile> loadLangFiles() {
+  std::vector<LangFile> out;
+  std::wstring dir = langsDir();
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW((dir + L"*.ini").c_str(), &fd);
+  if (h == INVALID_HANDLE_VALUE) return out;
+  do {
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+    LangFile lf;
+    std::wstring file = fd.cFileName;
+    lf.id = lowerW(file.substr(0, file.size() - 4));
+    if (!parseLangFile(dir + file, lf)) continue;
+    if (lf.name.empty()) lf.name = file.substr(0, file.size() - 4);
+    out.push_back(std::move(lf));
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
+  std::sort(out.begin(), out.end(), [](const LangFile& a, const LangFile& b) {
+    if (a.id == L"english" || b.id == L"english") return a.id == L"english";
+    return lowerW(a.name) < lowerW(b.name);
+  });
+  return out;
+}
+
+// AIMP's interface language name (Preferences -> Language), lower-case; empty outside AIMP.
+static std::wstring aimpLanguageName() {
+  std::wstring name;
+  if (!g_core) return name;
+  IAIMPServiceMUI* mui = nullptr;
+  if (SUCCEEDED(g_core->QueryInterface(IID_IAIMPServiceMUI, reinterpret_cast<void**>(&mui))) && mui) {
+    IAIMPString* s = nullptr;
+    if (SUCCEEDED(mui->GetName(&s)) && s) {
+      name.assign(s->GetData(), static_cast<size_t>(s->GetLength()));
+      s->Release();
+    }
+    mui->Release();
+  }
+  return lowerW(trimW(name));
+}
+
+// Picks the file for a Language setting: a file id, or "auto". Returns nullptr for English
+// built-in text.
+static const LangFile* pickLanguage(const std::vector<LangFile>& files, const std::wstring& setting) {
+  // older settings stored short codes
+  std::wstring want = setting == L"en" ? L"english" : setting == L"ru" ? L"russian"
+                    : setting == L"es" ? L"spanish" : setting;
+  if (want != L"auto" && !want.empty()) {
+    for (const auto& f : files) if (f.id == want) return &f;
+    return nullptr;
+  }
+  std::wstring name = aimpLanguageName();
+  if (!name.empty()) {
+    for (const auto& f : files)
+      for (const auto& n : f.aimp)
+        if (name == n || name.find(n) != std::wstring::npos) return &f;
+    return nullptr; // AIMP language without a file: English
+  }
+  // outside AIMP: Windows' language
+  wchar_t loc[LOCALE_NAME_MAX_LENGTH] = {0};
+  if (GetUserDefaultLocaleName(loc, LOCALE_NAME_MAX_LENGTH)) {
+    wchar_t eng[64] = {0};
+    if (GetLocaleInfoEx(loc, LOCALE_SENGLISHLANGUAGENAME, eng, 63)) {
+      std::wstring e = lowerW(eng);
+      for (const auto& f : files)
+        for (const auto& n : f.aimp)
+          if (e == n || n.find(e) != std::wstring::npos) return &f;
+    }
+  }
+  return nullptr;
+}
+
+// ------------------------------------------------------------------------------------
+// Settings dialog (Preferences -> Plugins -> settings button of this plugin)
+// ------------------------------------------------------------------------------------
 struct Choice {
-  const wchar_t* label;
+  const wchar_t* key;   // translation key
+  const wchar_t* label; // built-in English text
   const wchar_t* value; // what is written to the ini
 };
 
 static const Choice kLayouts[] = {
-    {L"Stereo (2.0)", L"stereo"}, {L"5.1 surround", L"5.1"}, {L"7.1 surround", L"7.1"},
-    {L"9.1.6 (16 channels)", L"9.1.6"}, {L"Mono", L"mono"}};
+    {L"Layout.Headphones", L"Headphones (3D)", L"headphones"},
+    {L"Layout.Stereo", L"Stereo (2.0, speakers)", L"stereo"},
+    {L"Layout.5.1", L"5.1 surround", L"5.1"},
+    {L"Layout.7.1", L"7.1 surround", L"7.1"},
+    {L"Layout.9.1.6", L"9.1.6 (16 channels)", L"9.1.6"},
+    {L"Layout.Mono", L"Mono", L"mono"}};
+static const Choice kRoom[] = {
+    {L"Room.Off", L"Off (dry)", L"0"}, {L"Room.Light", L"Light", L"15"},
+    {L"Room.Default", L"Default", L"30"}, {L"Room.Medium", L"Medium", L"50"},
+    {L"Room.Large", L"Large", L"75"}, {L"Room.Maximum", L"Maximum", L"100"}};
 static const Choice kLoudness[] = {
-    {L"Default (-24 LKFS)", L""}, {L"-16 LKFS (louder)", L"-16"}, {L"-18 LKFS", L"-18"},
-    {L"-20 LKFS", L"-20"}, {L"-23 LKFS", L"-23"}, {L"-27 LKFS", L"-27"},
-    {L"-31 LKFS (quiet, full dynamics)", L"-31"}};
+    {L"Loudness.Default", L"Default (-24 LKFS)", L""},
+    {L"Loudness.-16", L"-16 LKFS (louder)", L"-16"},
+    {L"Loudness.-18", L"-18 LKFS", L"-18"},
+    {L"Loudness.-20", L"-20 LKFS", L"-20"},
+    {L"Loudness.-23", L"-23 LKFS", L"-23"},
+    {L"Loudness.-27", L"-27 LKFS", L"-27"},
+    {L"Loudness.-31", L"-31 LKFS (quiet, full dynamics)", L"-31"}};
 static const Choice kDrc[] = {
-    {L"Default (only to prevent clipping)", L""}, {L"Off", L"-1"}, {L"Late night", L"1"},
-    {L"Noisy environment", L"2"}, {L"Limited playback range", L"3"},
-    {L"Low playback level", L"4"}, {L"Dialog enhancement", L"5"}, {L"General compression", L"6"}};
+    {L"Drc.Default", L"Default (only to prevent clipping)", L""},
+    {L"Drc.Off", L"Off", L"-1"},
+    {L"Drc.LateNight", L"Late night", L"1"},
+    {L"Drc.Noisy", L"Noisy environment", L"2"},
+    {L"Drc.Limited", L"Limited playback range", L"3"},
+    {L"Drc.LowLevel", L"Low playback level", L"4"},
+    {L"Drc.Dialog", L"Dialog enhancement", L"5"},
+    {L"Drc.General", L"General compression", L"6"}};
+
+// Text lookup in the chosen language, English if the key is missing.
+static const wchar_t* tr(const LangFile* lf, const wchar_t* key, const wchar_t* english) {
+  if (lf) {
+    auto it = lf->strings.find(key);
+    if (it != lf->strings.end() && !it->second.empty()) return it->second.c_str();
+  }
+  return english;
+}
 
 static std::wstring iniValue(const wchar_t* key, const wchar_t* def) {
   wchar_t buf[128];
@@ -828,12 +1074,16 @@ static std::wstring iniValue(const wchar_t* key, const wchar_t* def) {
   return trimLower(buf);
 }
 
-// Stores the three values. Falls back to the profile folder when the current file is read-only.
-static bool saveSettings(const std::wstring& layout, const std::wstring& loud, const std::wstring& drc) {
+// Stores the values. Falls back to the profile folder when the current file is read-only.
+static bool saveSettings(const std::wstring& layout, const std::wstring& loud, const std::wstring& drc,
+                         const std::wstring& room, bool tags, const std::wstring& lang) {
   auto writeAll = [&](const std::wstring& path) {
     return WritePrivateProfileStringW(L"MPEG-H", L"Layout", layout.c_str(), path.c_str()) &&
+           WritePrivateProfileStringW(L"MPEG-H", L"HeadphoneRoom", room.c_str(), path.c_str()) &&
+           WritePrivateProfileStringW(L"MPEG-H", L"ReadTags", tags ? L"1" : L"0", path.c_str()) &&
            WritePrivateProfileStringW(L"MPEG-H", L"TargetLoudness", loud.c_str(), path.c_str()) &&
-           WritePrivateProfileStringW(L"MPEG-H", L"DrcEffect", drc.c_str(), path.c_str());
+           WritePrivateProfileStringW(L"MPEG-H", L"DrcEffect", drc.c_str(), path.c_str()) &&
+           WritePrivateProfileStringW(L"MPEG-H", L"Language", lang.c_str(), path.c_str());
   };
   std::wstring cur = iniPath();
   if (writeAll(cur)) {
@@ -850,19 +1100,27 @@ static bool saveSettings(const std::wstring& layout, const std::wstring& loud, c
   return true;
 }
 
+struct DlgState {
+  std::wstring layout, loud, drc, room, lang;
+  std::vector<LangFile> files;
+  std::vector<std::wstring> langValues; // Language list entries: "auto", then file ids
+};
+
+// Fills a list in the chosen language and selects `current` (an ini value).
 template <size_t N>
 static void fillCombo(HWND dlg, int id, const Choice (&items)[N], const std::wstring& current,
-                      const wchar_t* customFmt) {
+                      const wchar_t* customFmt, const LangFile* lf) {
   HWND cb = GetDlgItem(dlg, id);
+  SendMessageW(cb, CB_RESETCONTENT, 0, 0);
   int sel = -1;
   for (size_t i = 0; i < N; i++) {
-    SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(items[i].label));
+    SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(tr(lf, items[i].key, items[i].label)));
     if (current == items[i].value) sel = static_cast<int>(i);
   }
   if (sel < 0) { // value typed by hand into the ini: keep it selectable
-    wchar_t label[160];
-    _snwprintf(label, 159, customFmt, current.c_str());
-    label[159] = 0;
+    wchar_t label[200];
+    _snwprintf(label, 199, customFmt, current.c_str());
+    label[199] = 0;
     sel = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label)));
   }
   SendMessageW(cb, CB_SETCURSEL, static_cast<WPARAM>(sel), 0);
@@ -875,34 +1133,112 @@ static std::wstring comboValue(HWND dlg, int id, const Choice (&items)[N], const
   return current; // the "custom" entry
 }
 
-struct DlgState {
-  std::wstring layout, loud, drc;
-};
+// Room sound only matters for Headphones (3D): grey it out for the other layouts.
+static void updateRoomEnabled(HWND dlg) {
+  LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_LAYOUT), CB_GETCURSEL, 0, 0);
+  bool hp = sel >= 0 && static_cast<size_t>(sel) < sizeof(kLayouts) / sizeof(kLayouts[0]) &&
+            wcscmp(kLayouts[sel].value, L"headphones") == 0;
+  EnableWindow(GetDlgItem(dlg, IDC_ROOM), hp);
+}
+
+// Puts every text of the dialog into the language of st->lang, keeping the current choices.
+static void applyLanguage(HWND dlg, DlgState* st) {
+  const LangFile* lf = pickLanguage(st->files, st->lang);
+  const wchar_t* custom = tr(lf, L"Custom", L"Custom (%ls)");
+  SetWindowTextW(dlg, tr(lf, L"Title", L"MPEG-H 3D Audio decoder"));
+  SetDlgItemTextW(dlg, IDS_LAYOUT, tr(lf, L"Label.Layout", L"Output layout:"));
+  SetDlgItemTextW(dlg, IDS_ROOM, tr(lf, L"Label.Room", L"Room sound (3D):"));
+  SetDlgItemTextW(dlg, IDS_LOUD, tr(lf, L"Label.Loudness", L"Loudness target:"));
+  SetDlgItemTextW(dlg, IDS_DRC, tr(lf, L"Label.Drc", L"Dynamic range control:"));
+  SetDlgItemTextW(dlg, IDS_LANG, tr(lf, L"Label.Language", L"Language:"));
+  SetDlgItemTextW(dlg, IDC_TAGS, tr(lf, L"ReadTags", L"Read title, artist and album tags from the file"));
+  SetDlgItemTextW(dlg, IDS_NOTE, tr(lf, L"Note",
+      L"Changes apply to the next track you start. Room sound is used only by Headphones (3D). "
+      L"Surround layouts need a sound device set up for that many channels."));
+  SetDlgItemTextW(dlg, IDOK, tr(lf, L"OK", L"OK"));
+  SetDlgItemTextW(dlg, IDCANCEL, tr(lf, L"Cancel", L"Cancel"));
+  fillCombo(dlg, IDC_LAYOUT, kLayouts, st->layout, tr(lf, L"CustomLayout", L"Custom layout (CICP %ls)"), lf);
+  fillCombo(dlg, IDC_ROOM, kRoom, st->room, custom, lf);
+  fillCombo(dlg, IDC_LOUDNESS, kLoudness, st->loud, tr(lf, L"CustomLkfs", L"Custom (%ls LKFS)"), lf);
+  fillCombo(dlg, IDC_DRC, kDrc, st->drc, custom, lf);
+
+  // Language list: Automatic, then every file by its own name
+  HWND cb = GetDlgItem(dlg, IDC_LANG);
+  SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+  st->langValues.assign(1, L"auto");
+  SendMessageW(cb, CB_ADDSTRING, 0,
+               reinterpret_cast<LPARAM>(tr(lf, L"Language.Auto", L"Automatic (as in AIMP)")));
+  bool haveEnglish = false;
+  for (const auto& f : st->files) {
+    st->langValues.push_back(f.id);
+    SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(f.name.c_str()));
+    if (f.id == L"english") haveEnglish = true;
+  }
+  if (!haveEnglish) { // built-in English is always available
+    st->langValues.push_back(L"english");
+    SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"English"));
+  }
+  int sel = 0;
+  for (size_t i = 0; i < st->langValues.size(); i++)
+    if (st->langValues[i] == st->lang) sel = static_cast<int>(i);
+  SendMessageW(cb, CB_SETCURSEL, static_cast<WPARAM>(sel), 0);
+  updateRoomEnabled(dlg);
+}
+
+// Reads the current choices from the controls back into the state.
+static void readChoices(HWND dlg, DlgState* st) {
+  st->layout = comboValue(dlg, IDC_LAYOUT, kLayouts, st->layout);
+  st->room = comboValue(dlg, IDC_ROOM, kRoom, st->room);
+  st->loud = comboValue(dlg, IDC_LOUDNESS, kLoudness, st->loud);
+  st->drc = comboValue(dlg, IDC_DRC, kDrc, st->drc);
+  LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_LANG), CB_GETCURSEL, 0, 0);
+  if (sel >= 0 && static_cast<size_t>(sel) < st->langValues.size()) st->lang = st->langValues[sel];
+}
 
 static INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
     case WM_INITDIALOG: {
       DlgState* st = reinterpret_cast<DlgState*>(lp);
       SetWindowLongPtrW(dlg, DWLP_USER, static_cast<LONG_PTR>(lp));
-      st->layout = iniValue(L"Layout", L"stereo");
+      st->files = loadLangFiles();
+      st->layout = iniValue(L"Layout", L"headphones");
       if (st->layout.empty() || st->layout == L"2.0") st->layout = L"stereo";
       if (st->layout == L"1.0") st->layout = L"mono";
       st->loud = iniValue(L"TargetLoudness", L"");
       st->drc = iniValue(L"DrcEffect", L"");
-      fillCombo(dlg, IDC_LAYOUT, kLayouts, st->layout, L"Custom layout (CICP %ls)");
-      fillCombo(dlg, IDC_LOUDNESS, kLoudness, st->loud, L"Custom (%ls LKFS)");
-      fillCombo(dlg, IDC_DRC, kDrc, st->drc, L"Custom (%ls)");
+      st->room = iniValue(L"HeadphoneRoom", L"30");
+      if (st->room.empty()) st->room = L"30";
+      st->lang = iniValue(L"Language", L"auto");
+      if (st->lang.empty()) st->lang = L"auto";
+      if (st->lang == L"en") st->lang = L"english";
+      if (st->lang == L"ru") st->lang = L"russian";
+      if (st->lang == L"es") st->lang = L"spanish";
+      CheckDlgButton(dlg, IDC_TAGS, iniValue(L"ReadTags", L"1") == L"0" ? BST_UNCHECKED : BST_CHECKED);
+      applyLanguage(dlg, st);
       return TRUE;
     }
-    case WM_COMMAND:
+    case WM_COMMAND: {
+      DlgState* st = reinterpret_cast<DlgState*>(GetWindowLongPtrW(dlg, DWLP_USER));
+      if (LOWORD(wp) == IDC_LAYOUT && HIWORD(wp) == CBN_SELCHANGE) {
+        updateRoomEnabled(dlg);
+        return TRUE;
+      }
+      if (LOWORD(wp) == IDC_LANG && HIWORD(wp) == CBN_SELCHANGE) { // switch the dialog right away
+        readChoices(dlg, st);
+        applyLanguage(dlg, st);
+        return TRUE;
+      }
       if (LOWORD(wp) == IDOK) {
-        DlgState* st = reinterpret_cast<DlgState*>(GetWindowLongPtrW(dlg, DWLP_USER));
-        bool ok = saveSettings(comboValue(dlg, IDC_LAYOUT, kLayouts, st->layout),
-                               comboValue(dlg, IDC_LOUDNESS, kLoudness, st->loud),
-                               comboValue(dlg, IDC_DRC, kDrc, st->drc));
-        if (!ok)
-          MessageBoxW(dlg, L"The settings could not be saved (the settings file is write-protected).",
-                      L"MPEG-H 3D Audio decoder", MB_OK | MB_ICONWARNING);
+        readChoices(dlg, st);
+        bool ok = saveSettings(st->layout, st->loud, st->drc, st->room,
+                               IsDlgButtonChecked(dlg, IDC_TAGS) == BST_CHECKED, st->lang);
+        if (!ok) {
+          const LangFile* lf = pickLanguage(st->files, st->lang);
+          MessageBoxW(dlg,
+                      tr(lf, L"SaveFailed",
+                         L"The settings could not be saved (the settings file is write-protected)."),
+                      tr(lf, L"Title", L"MPEG-H 3D Audio decoder"), MB_OK | MB_ICONWARNING);
+        }
         EndDialog(dlg, ok ? IDOK : IDCANCEL);
         return TRUE;
       }
@@ -911,6 +1247,7 @@ static INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
         return TRUE;
       }
       break;
+    }
     case WM_CLOSE:
       EndDialog(dlg, IDCANCEL);
       return TRUE;
@@ -960,22 +1297,26 @@ class DlgTemplate {
   WORD m_count = 0;
 };
 
+// Texts are filled in by applyLanguage(), so the template carries no words of its own.
 static void showSettingsDialog(HWND parent) {
   const WORD BUTTON = 0x0080, STATIC = 0x0082, COMBO = 0x0085;
   const DWORD comboStyle = CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP;
-  DlgTemplate t(L"MPEG-H 3D Audio decoder", 250, 122);
-  t.item(STATIC, L"Output layout:", 0xFFFF, SS_LEFT, 10, 12, 80, 10);
-  t.item(COMBO, L"", IDC_LAYOUT, comboStyle, 92, 10, 148, 120);
-  t.item(STATIC, L"Loudness target:", 0xFFFF, SS_LEFT, 10, 32, 80, 10);
-  t.item(COMBO, L"", IDC_LOUDNESS, comboStyle, 92, 30, 148, 140);
-  t.item(STATIC, L"Dynamic range control:", 0xFFFF, SS_LEFT, 10, 52, 80, 10);
-  t.item(COMBO, L"", IDC_DRC, comboStyle, 92, 50, 148, 140);
-  t.item(STATIC,
-         L"Changes apply to the next track you start. Surround layouts need a sound "
-         L"device set up for that many channels.",
-         0xFFFF, SS_LEFT, 10, 72, 230, 20);
-  t.item(BUTTON, L"OK", IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP, 135, 100, 50, 14);
-  t.item(BUTTON, L"Cancel", IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP, 190, 100, 50, 14);
+  const short W = 290, LW = 108, CX = 120, CW = 160;
+  DlgTemplate t(L"MPEG-H 3D Audio decoder", W, 188);
+  t.item(STATIC, L"", IDS_LAYOUT, SS_LEFT, 10, 12, LW, 10);
+  t.item(COMBO, L"", IDC_LAYOUT, comboStyle, CX, 10, CW, 120);
+  t.item(STATIC, L"", IDS_ROOM, SS_LEFT, 10, 32, LW, 10);
+  t.item(COMBO, L"", IDC_ROOM, comboStyle, CX, 30, CW, 120);
+  t.item(STATIC, L"", IDS_LOUD, SS_LEFT, 10, 52, LW, 10);
+  t.item(COMBO, L"", IDC_LOUDNESS, comboStyle, CX, 50, CW, 140);
+  t.item(STATIC, L"", IDS_DRC, SS_LEFT, 10, 72, LW, 10);
+  t.item(COMBO, L"", IDC_DRC, comboStyle, CX, 70, CW, 140);
+  t.item(STATIC, L"", IDS_LANG, SS_LEFT, 10, 92, LW, 10);
+  t.item(COMBO, L"", IDC_LANG, comboStyle, CX, 90, CW, 100);
+  t.item(BUTTON, L"", IDC_TAGS, BS_AUTOCHECKBOX | WS_TABSTOP, 10, 110, W - 20, 12);
+  t.item(STATIC, L"", IDS_NOTE, SS_LEFT, 10, 128, W - 20, 34);
+  t.item(BUTTON, L"", IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP, W - 130, 168, 55, 14);
+  t.item(BUTTON, L"", IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP, W - 65, 168, 55, 14);
   DlgState st;
   DialogBoxIndirectParamW(g_module, t.data(), parent, settingsDlgProc, reinterpret_cast<LPARAM>(&st));
 }

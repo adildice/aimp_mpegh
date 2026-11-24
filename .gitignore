@@ -2,3 +2,4 @@ out/
 deps/
 aimp_sdk/
 *.wav
+__pycache__/
