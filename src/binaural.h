@@ -69,6 +69,36 @@ class Delay {
   int m_pos = 0;
 };
 
+// RBJ biquad (direct form I), used for the output tone correction.
+struct Biquad {
+  float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+  float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  // kind: 0 peak, 1 low shelf, 2 high shelf
+  void set(int kind, float f0, float gainDb, float q, float fs) {
+    double A = std::pow(10.0, gainDb / 40.0), w = 2 * 3.14159265358979 * f0 / fs;
+    double cw = std::cos(w), sw = std::sin(w), al = sw / (2 * q), s = 2 * std::sqrt(A) * al;
+    double B0, B1, B2, A0, A1, A2;
+    if (kind == 0) {
+      B0 = 1 + al * A; B1 = -2 * cw; B2 = 1 - al * A; A0 = 1 + al / A; A1 = -2 * cw; A2 = 1 - al / A;
+    } else if (kind == 1) {
+      B0 = A * ((A + 1) - (A - 1) * cw + s); B1 = 2 * A * ((A - 1) - (A + 1) * cw);
+      B2 = A * ((A + 1) - (A - 1) * cw - s); A0 = (A + 1) + (A - 1) * cw + s;
+      A1 = -2 * ((A - 1) + (A + 1) * cw); A2 = (A + 1) + (A - 1) * cw - s;
+    } else {
+      B0 = A * ((A + 1) + (A - 1) * cw + s); B1 = -2 * A * ((A - 1) + (A + 1) * cw);
+      B2 = A * ((A + 1) + (A - 1) * cw - s); A0 = (A + 1) - (A - 1) * cw + s;
+      A1 = 2 * ((A - 1) - (A + 1) * cw); A2 = (A + 1) - (A - 1) * cw - s;
+    }
+    b0 = float(B0 / A0); b1 = float(B1 / A0); b2 = float(B2 / A0); a1 = float(A1 / A0); a2 = float(A2 / A0);
+  }
+  float run(float x) {
+    float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1; x1 = x; y2 = y1; y1 = y;
+    return y;
+  }
+  void clear() { x1 = x2 = y1 = y2 = 0; }
+};
+
 // One ear's view of one speaker.
 struct EarPath {
   float itd = 0;            // samples
@@ -149,7 +179,16 @@ class Renderer {
       }
     }
     setupRoom();
-    m_out = 0.22f; // speakers add up in both ears: keep headroom (level matched to Amazon's render)
+    // Tone and width correction, fitted against a recording of Amazon Music's 360 Reality Audio
+    // headphone playback (tools/compare_render.py): less bass build-up, brighter top, a little
+    // wider above 1.8 kHz.
+    static const float eq[4][4] = {{0, 90, -5.1f, 0.9f}, {1, 300, -1.4f, 0.7f},
+                                   {2, 3000, 5.2f, 0.7f}, {2, 11000, 3.9f, 0.7f}};
+    for (int i = 0; i < 4; i++)
+      for (int c = 0; c < 2; c++)
+        m_eq[c][i].set(static_cast<int>(eq[i][0]), eq[i][1], eq[i][2], eq[i][3], m_fs);
+    m_side.set(2, 1800, 1.4f, 0.7f, m_fs);
+    m_out = 0.29f; // speakers add up in both ears: keep headroom (level matched to Amazon's render)
     return true;
   }
 
@@ -159,6 +198,8 @@ class Renderer {
     for (auto& d : m_er) d.clear();
     for (auto& d : m_fdn) d.clear();
     std::memset(m_fdnLp, 0, sizeof(m_fdnLp));
+    for (auto& ch : m_eq) for (auto& b : ch) b.clear();
+    m_side.clear();
     m_lim = 1.0f;
   }
 
@@ -200,8 +241,12 @@ class Renderer {
       // room: early reflections and a short tail, fed from the speaker mix
       float rl = 0, rr = 0;
       if (m_room > 0) room(mono * 0.25f, side * 0.25f, rl, rr);
-      L = (L + rl) * m_out;
-      R = (R + rr) * m_out;
+      L += rl;
+      R += rr;
+      for (int i = 0; i < 4; i++) { L = m_eq[0][i].run(L); R = m_eq[1][i].run(R); }
+      float mid = (L + R) * 0.5f, sd = m_side.run((L - R) * 0.5f);
+      L = (mid + sd) * m_out;
+      R = (mid - sd) * m_out;
       // soft peak limiter
       float pk = std::max(std::fabs(L), std::fabs(R)) * m_lim;
       if (pk > 0.98f) m_lim = 0.98f / std::max(std::fabs(L), std::fabs(R));
@@ -284,6 +329,8 @@ class Renderer {
   float m_erD[8], m_erGL[8], m_erGR[8];
   float m_fdnLen[4], m_fdnG[4], m_fdnLp[4], m_fdnDamp = 0;
   float m_erMix = 0, m_tailMix = 0;
+  Biquad m_eq[2][4];
+  Biquad m_side;
 };
 
 } // namespace binaural
