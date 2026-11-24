@@ -236,12 +236,15 @@ class Renderer {
     for (int i = 0; i < 4; i++) {
       m_fdnLen[i] = len[i] * 0.001f * m_fs;
       m_fdn[i].init(static_cast<int>(m_fdnLen[i]) + 4);
-      m_fdnG[i] = std::pow(10.0f, -3.0f * (len[i] * 0.001f) / 0.45f);
+      // bigger room setting = longer tail: RT60 from 0.3 s (Light) to 0.9 s (Maximum)
+      float rt60 = 0.25f + 0.65f * m_room;
+      m_fdnG[i] = std::pow(10.0f, -3.0f * (len[i] * 0.001f) / rt60);
       m_fdnLp[i] = 0;
     }
     m_fdnDamp = std::exp(-2.0f * kPi * 6000.0f / m_fs);
-    m_erMix = 0.55f * m_room;
-    m_tailMix = 0.30f * m_room;
+    // Levels: Default (0.3) puts the room about 14 dB under the music, Maximum about 4 dB.
+    m_erMix = 3.9f * m_room;
+    m_tailMix = 2.1f * m_room;
   }
 
   void room(float mono, float side, float& outL, float& outR) {
