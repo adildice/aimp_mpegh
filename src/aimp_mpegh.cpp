@@ -33,6 +33,7 @@
 #include "mmtisobmff/reader/trackreader.h"
 #include "mpeghdecoder.h"
 #include "binaural.h"
+#include "dynamics.h"
 
 using namespace mmt::isobmff;
 
@@ -604,6 +605,7 @@ class CMpeghDecoder : public IAIMPAudioDecoder {
       m_pendingOff = 0;
       mpeghdecoder_flush(m_dec);
       if (m_settings.headphones) m_bin.reset();
+      m_dyn.reset();
 
       m_posFrames = target;
       if (!m_haveSample) {
@@ -711,6 +713,15 @@ class CMpeghDecoder : public IAIMPAudioDecoder {
         m_pending = oi.numSamplesPerChannel;
         if (m_settings.headphones) m_bin.process(m_raw.data(), m_out.data(), m_pending);
         else reorder(m_pending);
+        // Loudness target and DRC: the decoder applies them only to streams with loudness
+        // metadata. For streams without it (all 360 Reality Audio files) the plugin does it.
+        if (!m_dynReady) {
+          m_dynReady = true;
+          m_ownDynamics = oi.loudness == -1;
+          float lkfs = m_settings.targetLoudness >= 0 ? -m_settings.targetLoudness / 4.0f : 0.0f;
+          m_dyn.setup(m_channels, m_sampleRate, lkfs, m_settings.drcEffect);
+        }
+        if (m_ownDynamics) m_dyn.process(m_out.data(), m_pending);
         return true;
       }
       if (st != MPEGH_DEC_FEED_DATA) {
@@ -772,6 +783,9 @@ class CMpeghDecoder : public IAIMPAudioDecoder {
   std::vector<int32_t> m_raw; // decoder output before headphone rendering
   binaural::Renderer m_bin;
   int m_srcChannels = 0;
+  dynamics::Processor m_dyn;
+  bool m_dynReady = false;
+  bool m_ownDynamics = false; // stream has no loudness metadata: the plugin applies the settings
   int m_pending = 0;    // frames available in m_out
   int m_pendingOff = 0; // frames already consumed from m_out
   uint64_t m_lastTicks = 0;

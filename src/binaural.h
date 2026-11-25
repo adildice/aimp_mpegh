@@ -249,7 +249,7 @@ class Renderer {
       R = (mid - sd) * m_out;
       // soft peak limiter
       float pk = std::max(std::fabs(L), std::fabs(R)) * m_lim;
-      if (pk > 0.98f) m_lim = 0.98f / std::max(std::fabs(L), std::fabs(R));
+      if (pk > 0.89f) m_lim = 0.89f / std::max(std::fabs(L), std::fabs(R)); // -1 dBFS: room for peaks between samples
       else m_lim = std::min(1.0f, m_lim + 0.00002f);
       L *= m_lim; R *= m_lim;
       out[f * 2] = toI(L);

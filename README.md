@@ -32,8 +32,13 @@ There you choose:
   - **Stereo (2.0, speakers)**: plain two-speaker downmix.
   - 5.1, 7.1, 9.1.6 or Mono.
 - **Room sound (3D):** how much room is added in Headphones (3D), from Off (dry) to Maximum.
-- **Loudness target**
-- **Dynamic range control**
+- **Loudness target:** makes the music louder or quieter (-16 LKFS is louder, -31 quieter).
+- **Dynamic range control:** modes such as Late night or Noisy environment bring loud and quiet
+  parts closer together.
+
+  360 Reality Audio files carry no MPEG-H loudness or DRC information, so for them the plugin
+  applies these two settings itself (`src/dynamics.h`). Files that carry the information use
+  the decoder's own processing.
 - **Language** of the dialog: 44 languages; "Automatic" follows AIMP's interface language.
 - **Read tags:** untick it if titles or artists look wrong, and AIMP reads the tags itself.
 
