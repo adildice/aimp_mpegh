@@ -1,4 +1,4 @@
-// aimp_mpegh - MPEG-H 3D Audio (mha1 / mhm1 in MP4) input plugin for AIMP 5.x (64-bit)
+﻿// aimp_mpegh - MPEG-H 3D Audio (mha1 / mhm1 in MP4) input plugin for AIMP 5.x (64-bit)
 //
 // Demuxing : Fraunhofer mmtisobmff
 // Decoding : Fraunhofer FDK MPEG-H decoder (mpeghdec)
@@ -36,7 +36,7 @@
 
 using namespace mmt::isobmff;
 
-static const wchar_t* kPluginName = L"MPEG-H 3D Audio decoder (mha1/mhm1) v1.2";
+static const wchar_t* kPluginName = L"MPEG-H 3D Audio decoder (mha1/mhm1) v1.2.1";
 static const wchar_t* kPluginAuthor = L"Built with Fraunhofer FDK MPEG-H Software";
 static const wchar_t* kPluginShort = L"Plays MPEG-H 3D Audio (mha1 / mhm1) tracks in MP4 / M4A files";
 static const wchar_t* kPluginFull =
@@ -856,10 +856,10 @@ enum {
 // Dialog texts live in Langs\*.ini next to the plugin (or one folder up, for the 64-bit DLL
 // in x64\). Each file is UTF-8 or UTF-16 and looks like:
 //   [Info]
-//   Name=Русский               ; shown in the Language list
-//   AIMP=russian,русский       ; AIMP language names this file is picked for (Automatic)
+//   Name=Ð ÑƒÑÑÐºÐ¸Ð¹               ; shown in the Language list
+//   AIMP=russian,Ñ€ÑƒÑÑÐºÐ¸Ð¹       ; AIMP language names this file is picked for (Automatic)
 //   [Strings]
-//   Title=Декодер MPEG-H 3D Audio
+//   Title=Ð”ÐµÐºÐ¾Ð´ÐµÑ€ MPEG-H 3D Audio
 //   ...
 // Missing keys, or a missing folder, fall back to the English built into the plugin.
 // ------------------------------------------------------------------------------------
