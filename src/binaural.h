@@ -179,16 +179,16 @@ class Renderer {
       }
     }
     setupRoom();
-    // Tone and width correction, fitted against a recording of Amazon Music's 360 Reality Audio
-    // headphone playback (tools/compare_render.py): less bass build-up, brighter top, a little
-    // wider above 1.8 kHz.
-    static const float eq[4][4] = {{0, 90, -5.1f, 0.9f}, {1, 300, -1.4f, 0.7f},
-                                   {2, 3000, 5.2f, 0.7f}, {2, 11000, 3.9f, 0.7f}};
+    // Tone and width correction, fitted against recordings of Amazon Music's 360 Reality Audio
+    // headphone playback of three songs (tools/fit_tuning.py): less bass build-up, brighter
+    // top, a little wider above 1.8 kHz.
+    static const float eq[4][4] = {{0, 90, -4.7f, 0.9f}, {1, 300, -3.0f, 0.7f},
+                                   {2, 3000, 3.8f, 0.7f}, {2, 11000, 5.1f, 0.7f}};
     for (int i = 0; i < 4; i++)
       for (int c = 0; c < 2; c++)
         m_eq[c][i].set(static_cast<int>(eq[i][0]), eq[i][1], eq[i][2], eq[i][3], m_fs);
-    m_side.set(2, 1800, 1.4f, 0.7f, m_fs);
-    m_out = 0.29f; // speakers add up in both ears: keep headroom (level matched to Amazon's render)
+    m_side.set(2, 1800, 1.0f, 0.7f, m_fs);
+    m_out = 0.345f; // speakers add up in both ears: keep headroom (level matched to Amazon's render)
     return true;
   }
 
